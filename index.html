@@ -537,43 +537,74 @@ const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbzIMoPdJMGFEw2Czo
 // ── 시트 연동 상태 ──
 let sheetConnected = false;
 
-// ── 시트에서 데이터 불러오기 ──
-async function loadFromSheet() {
-  if(!SHEET_API_URL || SHEET_API_URL.includes('여기에')) return false;
-  try {
-    const [dRes, mRes] = await Promise.all([
-      fetch(SHEET_API_URL + '?sheet=dramas'),
-      fetch(SHEET_API_URL + '?sheet=movies')
-    ]);
-    const dData = await dRes.json();
-    const mData = await mRes.json();
+// ── 시트에서 데이터 불러오기 (JSONP 방식 — CORS 우회) ──
+function loadFromSheet() {
+  if(!SHEET_API_URL || SHEET_API_URL.includes('여기에')) return Promise.resolve(false);
 
-    if(Array.isArray(dData) && Array.isArray(mData)) {
-      dramas = dData.map(d => ({...d, type:'drama', id: Number(d.id), episodes: Number(d.episodes)||0}));
-      movies = mData.map(m => ({...m, type:'movie', id: Number(m.id), runtime: Number(m.runtime)||0,
-        theaters: Array.isArray(m.theaters) ? m.theaters : String(m.theaters||'').split(',').map(s=>s.trim()).filter(Boolean)
-      }));
-      // nextId를 시트 최대 id+1로 설정
-      const allIds = [...dramas, ...movies].map(x=>x.id).filter(n=>n>0);
-      nextId = allIds.length ? Math.max(...allIds) + 1 : 200;
-      sheetConnected = true;
-      updateSyncBadge(true);
-      return true;
-    }
-  } catch(e) {
-    console.warn('시트 로드 실패:', e);
-  }
-  updateSyncBadge(false);
-  return false;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      console.warn('시트 로드 타임아웃 — 샘플 데이터로 실행');
+      updateSyncBadge(false);
+      resolve(false);
+    }, 8000);
+
+    // dramas 먼저 로드
+    jsonpFetch(SHEET_API_URL + '?sheet=dramas', 'cbDramas')
+      .then(dData => jsonpFetch(SHEET_API_URL + '?sheet=movies', 'cbMovies').then(mData => [dData, mData]))
+      .then(([dData, mData]) => {
+        clearTimeout(timer);
+        if(Array.isArray(dData) && Array.isArray(mData)) {
+          dramas = dData.map(d => ({...d, type:'drama', id:Number(d.id), episodes:Number(d.episodes)||0}));
+          movies = mData.map(m => ({...m, type:'movie', id:Number(m.id), runtime:Number(m.runtime)||0,
+            theaters: Array.isArray(m.theaters) ? m.theaters
+              : String(m.theaters||'').split(',').map(s=>s.trim()).filter(Boolean)
+          }));
+          const allIds = [...dramas,...movies].map(x=>x.id).filter(n=>n>0);
+          nextId = allIds.length ? Math.max(...allIds)+1 : 200;
+          sheetConnected = true;
+          updateSyncBadge(true);
+          resolve(true);
+        } else {
+          updateSyncBadge(false);
+          resolve(false);
+        }
+      })
+      .catch(e => {
+        clearTimeout(timer);
+        console.warn('시트 로드 실패:', e.message);
+        updateSyncBadge(false);
+        resolve(false);
+      });
+  });
 }
 
-// ── 시트에 드라마 저장 ──
+// JSONP 방식으로 Apps Script 호출 (CORS 완전 우회)
+function jsonpFetch(url, cbName) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    const callbackName = cbName + '_' + Date.now();
+    window[callbackName] = (data) => {
+      delete window[callbackName];
+      script.remove();
+      resolve(data);
+    };
+    script.onerror = () => {
+      delete window[callbackName];
+      script.remove();
+      reject(new Error('JSONP 로드 실패'));
+    };
+    script.src = url + '&callback=' + callbackName;
+    document.head.appendChild(script);
+  });
+}
+
+// ── 시트에 데이터 저장 (fetch POST) ──
 async function saveToSheet(action, data) {
   if(!sheetConnected) return null;
   try {
     const res = await fetch(SHEET_API_URL, {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'text/plain'}, // text/plain은 preflight 없음
       body: JSON.stringify({ action, data })
     });
     return await res.json();
@@ -589,7 +620,7 @@ async function deleteFromSheet(title) {
   try {
     const res = await fetch(SHEET_API_URL, {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'text/plain'},
       body: JSON.stringify({ action:'remove_item', title })
     });
     return await res.json();
@@ -1467,15 +1498,21 @@ document.getElementById('searchInput').addEventListener('keydown', e => {
 // ══════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════
-window.addEventListener('load', async () => {
-  // 시트에서 데이터 로드 시도 (URL 설정됐을 때만)
-  await loadFromSheet();
-
+window.addEventListener('load', () => {
+  // 앱 UI 먼저 띄우고
   setTimeout(() => {
     document.getElementById('loadingOverlay').classList.add('hidden');
     setTimeout(() => document.getElementById('loadingOverlay').remove(), 600);
-  }, 900);
+  }, 800);
   switchTab('all');
+
+  // 시트 데이터는 백그라운드에서 로드 후 갱신
+  loadFromSheet().then(connected => {
+    if(connected) {
+      refresh();
+      console.log('✅ 구글 시트 연동 완료');
+    }
+  });
 });
 </script>
 </body>
